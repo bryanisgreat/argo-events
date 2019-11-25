@@ -29,6 +29,10 @@ required = [
   branch = "master"
 
 [[constraint]]
+  name = "github.com/rs/xid"
+  branch = "master"
+
+[[constraint]]
   name = "github.com/nlopes/slack"
   branch = "master"
 

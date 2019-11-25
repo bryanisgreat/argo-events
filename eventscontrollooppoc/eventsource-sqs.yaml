@@ -1,0 +1,21 @@
+# This configmap contains the event sources configurations for AWS SQS gateway
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-sqs-event-source
+  labels:
+    # do not remove
+    argo-events-event-source-version: v0.11
+data:
+   bchase-eventstatepoc: |-
+    accessKey:
+      key: accesskey
+      name: aws-secret
+    secretKey:
+      key: secretkey
+      name: aws-secret
+    region: "us-west-2"
+    queue: "bchase-eventstatepoc"
+    waitTimeSeconds: 20

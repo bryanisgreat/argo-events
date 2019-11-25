@@ -24,6 +24,12 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/rs/xid"
+  packages = ["."]
+  revision = "ba6f703301d6c14cbc05faa3b512058f2304e16c"
+
+[[projects]]
+  branch = "master"
   name = "github.com/Knetic/govaluate"
   packages = ["."]
   revision = "9aa49832a739dcd78a5542ff189fb82c3e423116"
@@ -85,6 +91,7 @@
     "internal/shareddefaults",
     "private/protocol",
     "private/protocol/json/jsonutil",
+    "private/protocol/jsonrpc",
     "private/protocol/query",
     "private/protocol/query/queryutil",
     "private/protocol/rest",
@@ -92,7 +99,11 @@
     "service/sns",
     "service/sqs",
     "service/sts",
-    "service/sts/stsiface"
+    "service/sts/stsiface",
+    "service/dynamodb",
+    "service/dynamodb/dynamodbiface",
+    "service/dynamodb/expression",
+    "service/dynamodb/dynamodbattribute"
   ]
   revision = "ab596ec53119dade64e6f3cf60dab4b45e613890"
 

@@ -17,13 +17,38 @@ limitations under the License.
 package aws_sqs
 
 import (
+	"encoding/json"
+	"time"
+
 	"github.com/argoproj/argo-events/common"
 	"github.com/argoproj/argo-events/gateways"
 	gwcommon "github.com/argoproj/argo-events/gateways/common"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	sqslib "github.com/aws/aws-sdk-go/service/sqs"
+
+	"fmt"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
+
+	"github.com/rs/xid"
 )
+
+type Item struct {
+	EventSource    string
+	CorrelationId  string
+	Payload        string
+	Status         string
+	TimeoutSeconds int
+	CreatedOn      string
+	Resources      []Resource
+}
+
+type Resource struct {
+	Id            string
+	Status        string
+	StatusMessage string
+}
 
 // StartEventSource starts an event source
 func (ese *SQSEventSourceExecutor) StartEventSource(eventSource *gateways.EventSource, eventStream gateways.Eventing_StartEventSourceServer) error {
@@ -74,8 +99,10 @@ func (ese *SQSEventSourceExecutor) listenEvents(s *sqsEventSource, eventSource *
 
 		awsSession = awsSessionWithCreds
 	}
+	var err error
 
 	sqsClient := sqslib.New(awsSession)
+	dbClient := dynamodb.New(awsSession)
 
 	queueURL, err := sqsClient.GetQueueUrl(&sqslib.GetQueueUrlInput{
 		QueueName: &s.Queue,
@@ -94,24 +121,75 @@ func (ese *SQSEventSourceExecutor) listenEvents(s *sqsEventSource, eventSource *
 			msg, err := sqsClient.ReceiveMessage(&sqslib.ReceiveMessageInput{
 				QueueUrl:            queueURL.QueueUrl,
 				MaxNumberOfMessages: aws.Int64(1),
-				WaitTimeSeconds:     aws.Int64(s.WaitTimeSeconds),
+				WaitTimeSeconds:     aws.Int64(20),
 			})
 			if err != nil {
-				ese.Log.WithField(common.LabelEventSource, eventSource.Name).WithError(err).Error("failed to process item from queue, waiting for next timeout")
+				fmt.Println("failed to process item from queue, waiting for next timeout", err)
 				continue
 			}
 
 			if msg != nil && len(msg.Messages) > 0 {
-				dataCh <- []byte(*msg.Messages[0].Body)
+				cid := xid.New().String()
+
+				var msgjson map[string]interface{}
+				err := json.Unmarshal([]byte(*msg.Messages[0].Body), &msgjson)
+
+				var mangledmsgbytes []byte
+				if err == nil {
+					msgjson["EventsMetadata"] = map[string]string{
+						"CorrelationId": cid,
+					}
+					mangledmsgbytes, err = json.Marshal(msgjson)
+				}
+
+				if err == nil {
+					addToDb(dbClient, cid, "Pending", string(mangledmsgbytes))
+					dataCh <- mangledmsgbytes
+				} else {
+					payload := fmt.Sprintf("ErrorMessage: %s, OriginalEvent: %v", err, *msg.Messages[0])
+					addToDb(dbClient, cid, "Failed", payload)
+					errorCh <- fmt.Errorf(payload)
+				}
 
 				if _, err := sqsClient.DeleteMessage(&sqslib.DeleteMessageInput{
 					QueueUrl:      queueURL.QueueUrl,
 					ReceiptHandle: msg.Messages[0].ReceiptHandle,
 				}); err != nil {
 					errorCh <- err
-					return
+					continue
 				}
 			}
 		}
 	}
+}
+
+func addToDb(dbclient *dynamodb.DynamoDB, correlationId, status, payload string) error {
+	item := Item{
+		EventSource:    "aws_sqs_gateway_custom",
+		CorrelationId:  correlationId,
+		Payload:        payload,
+		Status:         status,
+		TimeoutSeconds: 3600,
+		CreatedOn:      time.Now().UTC().String(),
+		Resources:      []Resource{},
+	}
+
+	av, err := dynamodbattribute.MarshalMap(item)
+	if err != nil {
+		return err
+	}
+
+	tableName := "bchase-eventstatepoc"
+
+	input := &dynamodb.PutItemInput{
+		Item:      av,
+		TableName: aws.String(tableName),
+	}
+
+	_, err = dbclient.PutItem(input)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
