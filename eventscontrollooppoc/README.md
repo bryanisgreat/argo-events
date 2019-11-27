@@ -1,6 +1,10 @@
 ## build image
 
-`#: IMAGE_TAG=v0.11 IMAGE_NAMESPACE=969213798065.dkr.ecr.us-west-2.amazonaws.com/bchase-eventstatepoc make sqs-image`  
 
-##  ecr access
-`#: ./gen-secret.sh`
+
+`#: IMAGE_TAG=v0.11 IMAGE_NAMESPACE=localhost:30500 make sqs-image`  
+`#: IMAGE_TAG=v0.11 IMAGE_NAMESPACE=localhost:30500 make resource-image`  
+
+
+`while (true); do sleep 5 &&  kubectl logs -n argo-events resource-gateway -c resource-events -f; done`
+`IMAGE_TAG=v0.11 IMAGE_NAMESPACE=localhost:30500 make resource-image && kubectl delete po -n argo-events resource-gateway`

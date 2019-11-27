@@ -99,7 +99,6 @@ func (ese *SQSEventSourceExecutor) listenEvents(s *sqsEventSource, eventSource *
 
 		awsSession = awsSessionWithCreds
 	}
-	var err error
 
 	sqsClient := sqslib.New(awsSession)
 	dbClient := dynamodb.New(awsSession)

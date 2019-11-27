@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: registry
+  template:
+    metadata:
+      labels:
+        name: registry
+    spec:
+      containers:
+      - resources:
+        name: registry
+        image: registry:2
+        ports:
+        - name: registry-port
+          containerPort: 5000
+        volumeMounts:
+        - mountPath: /var/lib/registry
+          name: images
+      volumes:
+      - name: images
+        hostPath:
+          path: /root/registry/images
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  labels:
+    name: registry
+spec:
+  ports:
+  - port: 5001
+    targetPort: 5000
+    nodePort: 30500
+  selector:
+    name: registry
+  type: NodePort

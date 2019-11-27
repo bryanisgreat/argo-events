@@ -260,8 +260,8 @@ sqs-linux:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make sqs
 
 sqs-image: sqs-linux
-	sudo docker build -t $(IMAGE_PREFIX)aws-sqs-gateway:$(IMAGE_TAG) -f ./gateways/community/aws-sqs/Dockerfile .
-	@if [ "$(DOCKER_PUSH)" = "true" ] ; then  sudo docker push $(IMAGE_PREFIX)aws-sqs-gateway:$(IMAGE_TAG) ; fi
+	docker build -t $(IMAGE_PREFIX)aws-sqs-gateway:$(IMAGE_TAG) -f ./gateways/community/aws-sqs/Dockerfile .
+	@if [ "$(DOCKER_PUSH)" = "true" ] ; then  docker push $(IMAGE_PREFIX)aws-sqs-gateway:$(IMAGE_TAG) ; fi
 
 slack:
 	go build -v -ldflags '${LDFLAGS}' -o ${DIST_DIR}/slack-gateway ./gateways/community/slack/cmd

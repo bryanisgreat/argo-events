@@ -22,6 +22,7 @@ import (
 	"github.com/argoproj/argo-events/common"
 	"github.com/argoproj/argo-events/gateways"
 	"github.com/argoproj/argo-events/gateways/core/resource"
+	"k8s.io/client-go/kubernetes"
 )
 
 func main() {
@@ -30,8 +31,15 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	clientset := kubernetes.NewForConfigOrDie(rest)
+	namespace, ok := os.LookupEnv(common.EnvVarGatewayNamespace)
+	if !ok {
+		panic("namespace is not provided")
+	}
 	gateways.StartGateway(&resource.ResourceEventSourceExecutor{
 		Log:          common.NewArgoEventsLogger(),
 		K8RestConfig: rest,
+		Clientset:    clientset,
+		Namespace:    namespace,
 	})
 }

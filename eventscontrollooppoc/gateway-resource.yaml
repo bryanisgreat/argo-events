@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Gateway
 metadata:
-  name: aws-sqs-gateway
+  name: resource-gateway
   labels:
     # gateway controller with instanceId "argo-events" will process this gateway
     gateways.argoproj.io/gateway-controller-instanceid: argo-events
@@ -9,8 +9,8 @@ metadata:
     # do not remove
     argo-events-gateway-version: v0.11
 spec:
-  type: "aws-sqs"
-  eventSource: "aws-sqs-event-source"
+  type: "resource"
+  eventSource: "resource-event-source"
   processorPort: "9330"
   eventProtocol:
     type: "HTTP"
@@ -18,20 +18,20 @@ spec:
       port: "9300"
   template:
     metadata:
-      name: "aws-sqs-gateway"
+      name: "resource-gateway"
       labels:
-        gateway-name: "aws-sqs-gateway"
+        gateway-name: "resource-gateway"
     spec:
       containers:
         - name: "gateway-client"
           image: "argoproj/gateway-client:v0.11"
           imagePullPolicy: "IfNotPresent"
           command: ["/bin/gateway-client"]
-        - name: "aws-sqs-events"
-          image: "localhost:30500/aws-sqs-gateway:v0.11"
+        - name: "resource-events"
+          image: "localhost:30500/resource-gateway:v0.11"
           imagePullPolicy: "Always"
-          command: ["/bin/aws-sqs-gateway"]
+          command: ["/bin/resource-gateway"]
       serviceAccountName: "argo-events-sa"
   watchers:
     sensors:
-      - name: "aws-sqs-sensor"
+      - name: "resource-sensor"

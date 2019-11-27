@@ -19,11 +19,16 @@ package resource
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
+	"os"
 
 	"github.com/argoproj/argo-events/common"
 	"github.com/argoproj/argo-events/gateways"
-	"github.com/pkg/errors"
+	gwcommon "github.com/argoproj/argo-events/gateways/common"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go/service/dynamodb/expression"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
@@ -35,9 +40,27 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
+type Item struct {
+	EventSource    string
+	CorrelationId  string
+	Payload        string
+	Status         string
+	TimeoutSeconds int
+	CreatedOn      string
+	Resources      []Resource
+}
+
+type Resource struct {
+	Id            string
+	Status        string
+	StatusMessage string
+}
+
 // StartEventSource starts an event source
-func (executor *ResourceEventSourceExecutor) StartEventSource(eventSource *gateways.EventSource, eventStream gateways.Eventing_StartEventSourceServer) error {
-	log := executor.Log.WithField(common.LabelEventSource, eventSource.Name)
+func (ese *ResourceEventSourceExecutor) StartEventSource(eventSource *gateways.EventSource, eventStream gateways.Eventing_StartEventSourceServer) error {
+	defer gateways.Recover(eventSource.Name)
+
+	log := ese.Log.WithField(common.LabelEventSource, eventSource.Name)
 	log.Info("operating on event source")
 
 	config, err := parseEventSource(eventSource.Data)
@@ -50,44 +73,74 @@ func (executor *ResourceEventSourceExecutor) StartEventSource(eventSource *gatew
 	errorCh := make(chan error)
 	doneCh := make(chan struct{}, 1)
 
-	go executor.listenEvents(config.(*resource), eventSource, dataCh, errorCh, doneCh)
+	go ese.listenEvents(config.(*resource), eventSource, dataCh, errorCh, doneCh)
 
-	return gateways.HandleEventsFromEventSource(eventSource.Name, eventStream, dataCh, errorCh, doneCh, executor.Log)
+	return gateways.HandleEventsFromEventSource(eventSource.Name, eventStream, dataCh, errorCh, doneCh, ese.Log)
 }
 
 // listenEvents watches resource updates and consume those events
-func (executor *ResourceEventSourceExecutor) listenEvents(resourceCfg *resource, eventSource *gateways.EventSource, dataCh chan []byte, errorCh chan error, doneCh chan struct{}) {
-	defer gateways.Recover(eventSource.Name)
+func (ese *ResourceEventSourceExecutor) listenEvents(s *resource, eventSource *gateways.EventSource, dataCh chan []byte, errorCh chan error, doneCh chan struct{}) {
+	var awsSession *session.Session
 
-	executor.Log.WithField(common.LabelEventSource, eventSource.Name).Info("started listening resource notifications")
-
-	client, err := dynamic.NewForConfig(executor.K8RestConfig)
+	client, err := dynamic.NewForConfig(ese.K8RestConfig)
 	if err != nil {
 		errorCh <- err
 		return
 	}
 
-	gvr := schema.GroupVersionResource{
-		Group:    resourceCfg.Group,
-		Version:  resourceCfg.Version,
-		Resource: resourceCfg.Resource,
-	}
-
-	client.Resource(gvr)
-
-	options := &metav1.ListOptions{}
-
-	if resourceCfg.Filter != nil && resourceCfg.Filter.Labels != nil {
-		sel, err := LabelSelector(resourceCfg.Filter.Labels)
+	if s.AccessKey == nil && s.SecretKey == nil {
+		awsSessionWithoutCreds, err := gwcommon.GetAWSSessionWithoutCreds(s.Region)
 		if err != nil {
 			errorCh <- err
 			return
 		}
-		options.LabelSelector = sel.String()
+
+		awsSession = awsSessionWithoutCreds
+	} else {
+		creds, err := gwcommon.GetAWSCreds(ese.Clientset, ese.Namespace, s.AccessKey, s.SecretKey)
+		if err != nil {
+			errorCh <- err
+			return
+		}
+
+		awsSessionWithCreds, err := gwcommon.GetAWSSession(creds, s.Region)
+		if err != nil {
+			errorCh <- err
+			return
+		}
+
+		awsSession = awsSessionWithCreds
 	}
 
-	if resourceCfg.Filter != nil && resourceCfg.Filter.Fields != nil {
-		sel, err := LabelSelector(resourceCfg.Filter.Fields)
+	gvr := schema.GroupVersionResource{
+		Group:    s.Group,
+		Version:  s.Version,
+		Resource: s.Resource,
+	}
+
+	client.Resource(gvr)
+	dbClient := dynamodb.New(awsSession)
+
+	options := &metav1.ListOptions{}
+
+	// if resourceCfg.Filter != nil && resourceCfg.Filter.Labels != nil {
+	// 	sel, err := LabelSelector(resourceCfg.Filter.Labels)
+	// 	if err != nil {
+	// 		errorCh <- err
+	// 		return
+	// 	}
+	// 	options.LabelSelector = sel.String()
+	// }
+
+	sel, err := controlLabel()
+	if err != nil {
+		errorCh <- err
+		return
+	}
+	options.LabelSelector = sel.String()
+
+	if s.Filter != nil && s.Filter.Fields != nil {
+		sel, err := LabelSelector(s.Filter.Fields)
 		if err != nil {
 			errorCh <- err
 			return
@@ -96,15 +149,15 @@ func (executor *ResourceEventSourceExecutor) listenEvents(resourceCfg *resource,
 	}
 
 	tweakListOptions := func(op *metav1.ListOptions) {
-		op = options
+		*op = *options
 	}
 
-	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(client, 0, resourceCfg.Namespace, tweakListOptions)
+	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(client, 0, s.Namespace, tweakListOptions)
 
 	informer := factory.ForResource(gvr)
 
 	informerEventCh := make(chan *InformerEvent)
-
+	ese.Log.Info("Loaded the eventsource!")
 	go func() {
 		for {
 			select {
@@ -112,13 +165,14 @@ func (executor *ResourceEventSourceExecutor) listenEvents(resourceCfg *resource,
 				if !ok {
 					return
 				}
+				ese.Log.Infof("%+v", event.Obj)
 				eventBody, err := json.Marshal(event)
 				if err != nil {
-					executor.Log.WithField(common.LabelEventSource, eventSource.Name).WithError(err).Errorln("failed to parse event from resource informer")
+					ese.Log.WithField(common.LabelEventSource, eventSource.Name).WithError(err).Errorln("failed to parse event from resource informer")
 					continue
 				}
-				if err := passFilters(event.Obj.(*unstructured.Unstructured), resourceCfg.Filter); err != nil {
-					executor.Log.WithField(common.LabelEventSource, eventSource.Name).WithError(err).Warnln("failed to apply the filter")
+				if err := passFilters(dbClient, event.Obj.(*unstructured.Unstructured), s.Filter); err != nil {
+					ese.Log.WithField(common.LabelEventSource, eventSource.Name).WithError(err).Warnln("failed to apply the filter")
 					continue
 				}
 				dataCh <- eventBody
@@ -127,6 +181,7 @@ func (executor *ResourceEventSourceExecutor) listenEvents(resourceCfg *resource,
 	}()
 
 	sharedInformer := informer.Informer()
+	informer.Lister()
 	sharedInformer.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
@@ -152,7 +207,7 @@ func (executor *ResourceEventSourceExecutor) listenEvents(resourceCfg *resource,
 	)
 
 	sharedInformer.Run(doneCh)
-	executor.Log.WithField(common.LabelEventSource, eventSource.Name).Infoln("resource informer is stopped")
+	ese.Log.WithField(common.LabelEventSource, eventSource.Name).Infoln("resource informer is stopped")
 	close(informerEventCh)
 	close(doneCh)
 }
@@ -193,17 +248,95 @@ func FieldSelector(fieldSelectors map[string]string) (fields.Selector, error) {
 }
 
 // helper method to check if the object passed the user defined filters
-func passFilters(obj *unstructured.Unstructured, filter *ResourceFilter) error {
+func passFilters(dbClient *dynamodb.DynamoDB, obj *unstructured.Unstructured, filter *ResourceFilter) error {
 	// no filters are applied.
-	if filter == nil {
-		return nil
+	// if filter == nil {
+	// 	return nil
+	// }
+
+	// if !strings.HasPrefix(obj.GetName(), filter.Prefix) {
+	// 	return errors.Errorf("resource name does not match prefix. resource-name: %s, prefix: %s", obj.GetName(), filter.Prefix)
+	// }
+	// created := obj.GetCreationTimestamp()
+	// if !filter.CreatedBy.IsZero() && created.UTC().After(filter.CreatedBy.UTC()) {
+	// 	return errors.Errorf("resource is created after filter time. creation-timestamp: %s, filter-creation-timestamp: %s", created.UTC().String(), filter.CreatedBy.UTC().String())
+	// }
+	labels := obj.GetLabels()
+	correlationId := labels["events/correlationId"]
+	tableName := "bchase-eventstatepoc"
+
+	// filt := expression.Name("CorrelationId").Equal(expression.Value(correlationId)).And(expression.Name("State").NotEqual(expression.Value("Complete")))
+	filt := expression.Name("CorrelationId").Equal(expression.Value(correlationId))
+
+	expr, err := expression.NewBuilder().WithFilter(filt).Build()
+	if err != nil {
+		fmt.Println("Got error building expression:")
+		fmt.Println(err.Error())
+		os.Exit(1)
 	}
-	if !strings.HasPrefix(obj.GetName(), filter.Prefix) {
-		return errors.Errorf("resource name does not match prefix. resource-name: %s, prefix: %s", obj.GetName(), filter.Prefix)
+
+	// Build the query input parameters
+	params := &dynamodb.ScanInput{
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+		FilterExpression:          expr.Filter(),
+		TableName:                 aws.String(tableName),
 	}
-	created := obj.GetCreationTimestamp()
-	if !filter.CreatedBy.IsZero() && created.UTC().After(filter.CreatedBy.UTC()) {
-		return errors.Errorf("resource is created after filter time. creation-timestamp: %s, filter-creation-timestamp: %s", created.UTC().String(), filter.CreatedBy.UTC().String())
+
+	// Make the DynamoDB Query API call
+	result, err := dbClient.Scan(params)
+	if err != nil {
+		fmt.Println("Query API call failed:")
+		fmt.Println((err.Error()))
+		os.Exit(1)
+	}
+
+	for _, i := range result.Items {
+		item := Item{}
+		err = dynamodbattribute.UnmarshalMap(i, &item)
+
+		if err != nil {
+			fmt.Println("Got error unmarshalling:")
+			fmt.Println(err.Error())
+			os.Exit(1)
+		}
+		fmt.Println("updating item: ", item)
+
+		resourceId := fmt.Sprintf("%s/%s/%s", obj.GetNamespace(), obj.GetKind(), obj.GetName())
+		fmt.Printf("resourceid: %s", resourceId)
+		foundresource := false
+		for i := range item.Resources {
+			if item.Resources[i].Id == resourceId {
+				foundresource = true
+				item.Resources[i].Status = "Completed"
+				item.Resources[i].StatusMessage = "Warning: blah blah"
+			}
+		}
+		if !foundresource {
+			item.Resources = append(item.Resources, Resource{Id: resourceId, Status: "Running"})
+		}
+
+		av, err := dynamodbattribute.MarshalMap(item)
+		input := &dynamodb.PutItemInput{
+			Item:      av,
+			TableName: aws.String(tableName),
+		}
+		_, err = dbClient.PutItem(input)
+		if err != nil {
+			fmt.Println(err.Error())
+			return err
+		}
 	}
 	return nil
+}
+
+// LabelSelector returns label selector for resource filtering
+func controlLabel() (labels.Selector, error) {
+	var labelRequirements []labels.Requirement
+	req, err := labels.NewRequirement("events/correlationId", selection.Exists, []string{})
+	if err != nil {
+		return nil, err
+	}
+	labelRequirements = append(labelRequirements, *req)
+	return labels.NewSelector().Add(labelRequirements...), nil
 }

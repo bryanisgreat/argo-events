@@ -19,7 +19,9 @@ package resource
 import (
 	"github.com/ghodss/yaml"
 	"github.com/sirupsen/logrus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
@@ -45,10 +47,22 @@ type ResourceEventSourceExecutor struct {
 	Log *logrus.Logger
 	// K8RestConfig is kubernetes cluster config
 	K8RestConfig *rest.Config
+	// Clientset is kubernetes client
+	Clientset kubernetes.Interface
+	// Namespace where gateway is deployed
+	Namespace string
 }
 
 // resource refers to a dependency on a k8s resource.
 type resource struct {
+	// AccessKey refers K8 secret containing aws access key
+	AccessKey *corev1.SecretKeySelector `json:"accessKey"`
+
+	// SecretKey refers K8 secret containing aws secret key
+	SecretKey *corev1.SecretKeySelector `json:"secretKey"`
+
+	// Region is AWS region
+	Region string `json:"region"`
 	// Namespace where resource is deployed
 	Namespace string `json:"namespace"`
 	// Filter is applied on the metadata of the resource

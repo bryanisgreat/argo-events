@@ -16,7 +16,7 @@ spec:
       containers:
         - name: "sensor"
           image: "argoproj/sensor:v0.11"
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent 
       serviceAccountName: argo-events-sa
   eventProtocol:
     type: "HTTP"
@@ -41,15 +41,12 @@ spec:
               containers:
                 - name: hello-container
                   args:
-                    - "hello-world"
+                    - "-c"
+                    - "echo helloworld && sleep 20"
                   command:
-                    - cowsay
-                  image: "docker/whalesay:latest"
+                    - "sh"
+                  image: "amouat/network-utils"
       resourceParameters:
-        - src:
-            event: "aws-sqs-gateway:bchase-eventstatepoc"
-            path: heyvalue
-          dest: spec.containers.0.args.0
         - src:
             event: "aws-sqs-gateway:bchase-eventstatepoc"
             path: EventsMetadata.CorrelationId
