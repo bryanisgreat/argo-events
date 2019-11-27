@@ -49,5 +49,9 @@ spec:
       resourceParameters:
         - src:
             event: "aws-sqs-gateway:bchase-eventstatepoc"
+            path: customargs
+          dest: spec.containers.0.args.1
+        - src:
+            event: "aws-sqs-gateway:bchase-eventstatepoc"
             path: EventsMetadata.CorrelationId
           dest: metadata.labels.events/correlationId

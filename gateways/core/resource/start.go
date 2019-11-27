@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/argoproj/argo-events/common"
 	"github.com/argoproj/argo-events/gateways"
@@ -82,6 +83,7 @@ func (ese *ResourceEventSourceExecutor) StartEventSource(eventSource *gateways.E
 func (ese *ResourceEventSourceExecutor) listenEvents(s *resource, eventSource *gateways.EventSource, dataCh chan []byte, errorCh chan error, doneCh chan struct{}) {
 	var awsSession *session.Session
 
+	dbStatusCheckTicker := time.NewTicker(10 * time.Second)
 	client, err := dynamic.NewForConfig(ese.K8RestConfig)
 	if err != nil {
 		errorCh <- err
@@ -161,6 +163,13 @@ func (ese *ResourceEventSourceExecutor) listenEvents(s *resource, eventSource *g
 	go func() {
 		for {
 			select {
+			case _ = <-dbStatusCheckTicker.C:
+				ese.Log.Infoln("checking database to update")
+				err = updateStatusFromDb(dbClient)
+				if err != nil {
+					errorCh <- err
+				}
+				ese.Log.Infoln("done checking database to update")
 			case event, ok := <-informerEventCh:
 				if !ok {
 					return
@@ -288,7 +297,7 @@ func passFilters(dbClient *dynamodb.DynamoDB, obj *unstructured.Unstructured, fi
 	if err != nil {
 		fmt.Println("Query API call failed:")
 		fmt.Println((err.Error()))
-		os.Exit(1)
+		return err
 	}
 
 	for _, i := range result.Items {
@@ -298,22 +307,27 @@ func passFilters(dbClient *dynamodb.DynamoDB, obj *unstructured.Unstructured, fi
 		if err != nil {
 			fmt.Println("Got error unmarshalling:")
 			fmt.Println(err.Error())
-			os.Exit(1)
+			return err
 		}
 		fmt.Println("updating item: ", item)
 
-		resourceId := fmt.Sprintf("%s/%s/%s", obj.GetNamespace(), obj.GetKind(), obj.GetName())
-		fmt.Printf("resourceid: %s", resourceId)
+		phase, found, err := unstructured.NestedString(obj.UnstructuredContent(), "status", "phase")
+		if err != nil || !found {
+			phase = "Unknown"
+			//log err
+		}
+
+		resourceId := obj.GetSelfLink()
 		foundresource := false
 		for i := range item.Resources {
 			if item.Resources[i].Id == resourceId {
 				foundresource = true
-				item.Resources[i].Status = "Completed"
+				item.Resources[i].Status = phase
 				item.Resources[i].StatusMessage = "Warning: blah blah"
 			}
 		}
 		if !foundresource {
-			item.Resources = append(item.Resources, Resource{Id: resourceId, Status: "Running"})
+			item.Resources = append(item.Resources, Resource{Id: resourceId, Status: phase})
 		}
 
 		av, err := dynamodbattribute.MarshalMap(item)
@@ -339,4 +353,102 @@ func controlLabel() (labels.Selector, error) {
 	}
 	labelRequirements = append(labelRequirements, *req)
 	return labels.NewSelector().Add(labelRequirements...), nil
+}
+
+func updateStatusFromDb(dbclient *dynamodb.DynamoDB) error {
+
+	tableName := "bchase-eventstatepoc"
+	filt := expression.Name("Status").NotEqual(expression.Value("Failed")).And(expression.Name("Status").NotEqual(expression.Value("Succeeded")))
+
+	expr, err := expression.NewBuilder().WithFilter(filt).Build()
+	if err != nil {
+		fmt.Println("Got error building expression:")
+		fmt.Println(err.Error())
+		os.Exit(1)
+	}
+
+	// Build the query input parameters
+	params := &dynamodb.ScanInput{
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+		FilterExpression:          expr.Filter(),
+		TableName:                 aws.String(tableName),
+	}
+	result, err := dbclient.Scan(params)
+	if err != nil {
+		fmt.Println("Query API call failed:")
+		fmt.Println((err.Error()))
+		return err
+	}
+
+	for _, i := range result.Items {
+		item := Item{}
+		err = dynamodbattribute.UnmarshalMap(i, &item)
+
+		if err != nil {
+			fmt.Println("Got error unmarshalling:")
+			fmt.Println(err.Error())
+			return err
+		}
+		fmt.Println("updating item: ", item)
+
+		var itemStatus string
+
+		//Update for timeout
+		createdOn, err := time.Parse(time.RFC3339, item.CreatedOn)
+		if err != nil {
+			return err
+		}
+		expiredTime := createdOn.Add(time.Duration(item.TimeoutSeconds) * time.Second)
+		now := time.Now().UTC()
+		if now.After(expiredTime) {
+			itemStatus = "Failed"
+			fmt.Printf("EXPIRED!!!! %s,  $s", expiredTime, now)
+			updateItemStatus(dbclient, &item, &tableName, &itemStatus)
+			return nil
+		}
+
+		//Update for resources
+		if item.Resources != nil && len(item.Resources) > 0 {
+			itemStatus = "Running"
+			isAllComplete := true
+			isAllSuccessful := true
+			for i := range item.Resources {
+				if !(item.Resources[i].Status == "Failed" || item.Resources[i].Status == "Succeeded") {
+					isAllComplete = false
+				}
+				if item.Resources[i].Status == "Failed" {
+					isAllSuccessful = false
+				}
+			}
+
+			if isAllComplete {
+				//Update parent status to complete
+				if isAllSuccessful {
+					itemStatus = "Succeeded"
+				} else {
+					itemStatus = "Failed"
+				}
+			}
+			updateItemStatus(dbclient, &item, &tableName, &itemStatus)
+		}
+	}
+	return nil
+}
+
+func updateItemStatus(dbclient *dynamodb.DynamoDB, item *Item, tableName, status *string) error {
+
+	item.Status = *status
+
+	av, err := dynamodbattribute.MarshalMap(item)
+	input := &dynamodb.PutItemInput{
+		Item:      av,
+		TableName: aws.String(*tableName),
+	}
+	_, err = dbclient.PutItem(input)
+	if err != nil {
+		fmt.Println(err.Error())
+		return err
+	}
+	return nil
 }

@@ -169,7 +169,7 @@ func addToDb(dbclient *dynamodb.DynamoDB, correlationId, status, payload string)
 		Payload:        payload,
 		Status:         status,
 		TimeoutSeconds: 3600,
-		CreatedOn:      time.Now().UTC().String(),
+		CreatedOn:      time.Now().UTC().Format(time.RFC3339),
 		Resources:      []Resource{},
 	}
 
