@@ -43,18 +43,20 @@ import (
 
 type Item struct {
 	EventSource    string
-	CorrelationId  string
+	CorrelationID  string
 	Payload        string
 	Status         string
+	StatusBody     string
 	TimeoutSeconds int
 	CreatedOn      string
 	Resources      []Resource
 }
 
 type Resource struct {
-	Id            string
-	Status        string
-	StatusMessage string
+	Link       string
+	ID         string
+	Status     string
+	StatusBody string
 }
 
 // StartEventSource starts an event source
@@ -174,7 +176,7 @@ func (ese *ResourceEventSourceExecutor) listenEvents(s *resource, eventSource *g
 				if !ok {
 					return
 				}
-				ese.Log.Infof("%+v", event.Obj)
+				// ese.Log.Infof("%+v", event.Obj)
 				eventBody, err := json.Marshal(event)
 				if err != nil {
 					ese.Log.WithField(common.LabelEventSource, eventSource.Name).WithError(err).Errorln("failed to parse event from resource informer")
@@ -274,8 +276,8 @@ func passFilters(dbClient *dynamodb.DynamoDB, obj *unstructured.Unstructured, fi
 	correlationId := labels["events/correlationId"]
 	tableName := "bchase-eventstatepoc"
 
-	// filt := expression.Name("CorrelationId").Equal(expression.Value(correlationId)).And(expression.Name("State").NotEqual(expression.Value("Complete")))
-	filt := expression.Name("CorrelationId").Equal(expression.Value(correlationId))
+	// filt := expression.Name("CorrelationID").Equal(expression.Value(correlationId)).And(expression.Name("State").NotEqual(expression.Value("Complete")))
+	filt := expression.Name("CorrelationID").Equal(expression.Value(correlationId))
 
 	expr, err := expression.NewBuilder().WithFilter(filt).Build()
 	if err != nil {
@@ -316,18 +318,30 @@ func passFilters(dbClient *dynamodb.DynamoDB, obj *unstructured.Unstructured, fi
 			phase = "Unknown"
 			//log err
 		}
-
-		resourceId := obj.GetSelfLink()
+		statusBody, _, _ := unstructured.NestedFieldNoCopy(obj.UnstructuredContent(), "status")
+		statusBodyMsg := ""
+		if statusBody != nil {
+			var enc []byte
+			enc, err = json.Marshal(statusBody)
+			if err == nil {
+				statusBodyMsg = string(enc)
+			}
+		}
+		fmt.Println("marshald status body")
+		fmt.Println(statusBodyMsg)
+		resourceID := string(obj.GetUID())
+		resourceLink := obj.GetSelfLink()
 		foundresource := false
 		for i := range item.Resources {
-			if item.Resources[i].Id == resourceId {
+			if item.Resources[i].ID == resourceID {
 				foundresource = true
+				item.Resources[i].Link = resourceLink
 				item.Resources[i].Status = phase
-				item.Resources[i].StatusMessage = "Warning: blah blah"
+				item.Resources[i].StatusBody = statusBodyMsg
 			}
 		}
 		if !foundresource {
-			item.Resources = append(item.Resources, Resource{Id: resourceId, Status: phase})
+			item.Resources = append(item.Resources, Resource{ID: resourceID, Status: phase, StatusBody: statusBodyMsg})
 		}
 
 		av, err := dynamodbattribute.MarshalMap(item)
@@ -403,8 +417,8 @@ func updateStatusFromDb(dbclient *dynamodb.DynamoDB) error {
 		now := time.Now().UTC()
 		if now.After(expiredTime) {
 			itemStatus = "Failed"
-			fmt.Printf("EXPIRED!!!! %s,  $s", expiredTime, now)
-			updateItemStatus(dbclient, &item, &tableName, &itemStatus)
+			itemStatusBody := fmt.Sprintf("Expired at %s. Current time when compared: $s", expiredTime, now)
+			updateItemStatus(dbclient, &item, &tableName, &itemStatus, &itemStatusBody)
 			return nil
 		}
 
@@ -413,15 +427,16 @@ func updateStatusFromDb(dbclient *dynamodb.DynamoDB) error {
 			itemStatus = "Running"
 			isAllComplete := true
 			isAllSuccessful := true
-			for i := range item.Resources {
-				if !(item.Resources[i].Status == "Failed" || item.Resources[i].Status == "Succeeded") {
+			for _, i := range item.Resources {
+				if !(i.Status == "Failed" || i.Status == "Succeeded") {
 					isAllComplete = false
 				}
-				if item.Resources[i].Status == "Failed" {
+				if i.Status == "Failed" {
 					isAllSuccessful = false
 				}
 			}
 
+			sbsjson := ""
 			if isAllComplete {
 				//Update parent status to complete
 				if isAllSuccessful {
@@ -429,16 +444,29 @@ func updateStatusFromDb(dbclient *dynamodb.DynamoDB) error {
 				} else {
 					itemStatus = "Failed"
 				}
+
+				sbs := []map[string]interface{}{}
+				for _, i := range item.Resources {
+					sbmap := map[string]interface{}{}
+					var sb interface{}
+					json.Unmarshal([]byte(i.StatusBody), &sb)
+					sbmap[i.Link] = sb
+					sbs = append(sbs, sbmap)
+				}
+				sbsb, _ := json.Marshal(sbs)
+				sbsjson = string(sbsb)
+
 			}
-			updateItemStatus(dbclient, &item, &tableName, &itemStatus)
+			updateItemStatus(dbclient, &item, &tableName, &itemStatus, &sbsjson)
 		}
 	}
 	return nil
 }
 
-func updateItemStatus(dbclient *dynamodb.DynamoDB, item *Item, tableName, status *string) error {
+func updateItemStatus(dbclient *dynamodb.DynamoDB, item *Item, tableName, status, statusBody *string) error {
 
 	item.Status = *status
+	item.StatusBody = *statusBody
 
 	av, err := dynamodbattribute.MarshalMap(item)
 	input := &dynamodb.PutItemInput{

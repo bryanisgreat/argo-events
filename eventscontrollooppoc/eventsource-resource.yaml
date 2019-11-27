@@ -51,6 +51,21 @@ data:
     version: "v1"
     resource: "pods"
 
+  # pods-update: |-
+  #   dynamodb:
+  #     accessKey:
+  #       key: accesskey
+  #       name: aws-secret
+  #     secretKey:
+  #       key: secretkay
+  #       name: aws-secret
+  #     region: us-west-2
+  #     tablename: bchase-eventstatepoc #could have a separate table per eventsource input or?
+  #   namespace: argo-events #to watch
+  #   group: ""
+  #   version: v1
+  #   resource: "pods"
+
   # configmapupdates: |-
   #   accessKey:
   #     key: accesskey

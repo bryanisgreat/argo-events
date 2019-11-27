@@ -36,18 +36,20 @@ import (
 
 type Item struct {
 	EventSource    string
-	CorrelationId  string
+	CorrelationID  string
 	Payload        string
 	Status         string
+	StatusBody     string
 	TimeoutSeconds int
 	CreatedOn      string
 	Resources      []Resource
 }
 
 type Resource struct {
-	Id            string
-	Status        string
-	StatusMessage string
+	Link       string
+	ID         string
+	Status     string
+	StatusBody string
 }
 
 // StartEventSource starts an event source
@@ -165,7 +167,7 @@ func (ese *SQSEventSourceExecutor) listenEvents(s *sqsEventSource, eventSource *
 func addToDb(dbclient *dynamodb.DynamoDB, correlationId, status, payload string) error {
 	item := Item{
 		EventSource:    "aws_sqs_gateway_custom",
-		CorrelationId:  correlationId,
+		CorrelationID:  correlationId,
 		Payload:        payload,
 		Status:         status,
 		TimeoutSeconds: 3600,
